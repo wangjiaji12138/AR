@@ -1,0 +1,6 @@
+# Development checks are deferred at the user's request.
+pytest>=8,<10
+ruff>=0.6,<1
+black>=24,<27
+mypy>=1.10,<2
+types-PyYAML>=6,<7

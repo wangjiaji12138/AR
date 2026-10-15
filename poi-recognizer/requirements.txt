@@ -1,0 +1,7 @@
+# Data preparation dependencies. Paddle GPU and official training dependencies
+# are installed separately in the project Conda environment.
+numpy>=1.24,<3
+Pillow>=10,<13
+opencv-python-headless>=4.8,<5
+PyYAML>=6,<7
+shapely>=2,<3

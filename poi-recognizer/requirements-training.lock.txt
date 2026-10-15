@@ -1,0 +1,17 @@
+# Verified in myenv on A800 / CUDA 11.8; install Paddle GPU from its official index first.
+# Targeted OCR dependencies, not a full machine pip freeze.
+paddlepaddle-gpu==3.1.1
+paddleocr==3.2.0
+paddlex==3.2.0
+numpy==2.2.6
+Pillow==12.3.0
+PyYAML==6.0.2
+opencv-python-headless==4.14.0.94
+opencv-contrib-python==4.10.0.84
+shapely==2.1.2
+lmdb==3.0.0
+pyclipper==1.4.0
+rapidfuzz==3.14.5
+scikit-image==0.25.2
+albumentations==2.0.8
+albucore==0.0.24
