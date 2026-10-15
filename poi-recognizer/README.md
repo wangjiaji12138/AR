@@ -53,7 +53,7 @@ bash train.sh
 
 需要先检查能否跑通时，手动执行 `bash train.sh --smoke`：每阶段 train/val 各至多四张可解码图片，每个模型一轮，batch=2。这不能代表训练效果。
 
-终端显示当前第几步、初始权重、日志位置以及训练/验证进度。Ctrl+C 中断。训练配置统一维护在 `configs/train.json`。
+终端显示当前第几步、初始权重、日志位置；每轮训练和验证用一条动态进度条显示，轮结束后只输出一行训练/验证指标摘要。警告和错误仍立即显示。日志不保存逐 batch 刷新；重定向到文件时不输出动态进度条。Ctrl+C 中断。训练配置统一维护在 `configs/train.json`。
 
 ## 训练结果在哪
 
@@ -62,14 +62,30 @@ bash train.sh
 ```text
 train-<时间>/
 ├── settings.json         # 本次配置
-├── rects/                # 第一阶段的数据、配置、日志和模型
-├── data/                 # LSVT 标签、裁剪及数据质量统计
+├── rects/                # 第一阶段的样例、配置、日志和最佳模型
+├── data/
+│   ├── examples/         # 约 1% 图像和配套检测/识别标签（含 train/val）
+│   │   ├── images/       # 抽取的检测原图副本
+│   │   ├── crops/        # 抽取的识别裁剪图
+│   │   ├── det_*.txt / rec_*.txt
+│   │   └── manifest.json # 原始/保留数量、抽样比例和 seed
+│   └── …                 # report.json、skipped.jsonl、完整划分编号
 ├── det.yml / rec.yml     # 实际交给 PaddleOCR 的配置
 ├── det.log / rec.log     # 每轮摘要、指标和必要诊断
 └── det/ / rec/           # 最终检测/识别模型
 ```
 
-最终权重为 `det/best_accuracy.pdparams` 和 `rec/best_accuracy.pdparams`。`latest.*` 是最近检查点。数据过滤原因见各阶段 `data/report.json` 和 `data/skipped.jsonl`。
+最终权重为 `det/best_accuracy.pdparams` 和 `rec/best_accuracy.pdparams`；ReCTS 的两份最佳权重也保留。数据过滤原因见各阶段 `data/report.json` 和 `data/skipped.jsonl`。
+
+训练时仍使用完整数据，并临时保存检查点。**四个训练任务全部成功后自动精简**：每阶段、每个任务、每个 train/val 集合独立按 seed=42 抽取 1%（向上取整，非空集合至少一条），保留图像及配套标签，标签中的图片路径相对 `examples/`。删除全量裁剪缓存、全量训练/验证标签、`latest.*`、`iter_epoch_*`、优化器、重复的 `best_model/` 和模型目录内的重复配置；保留最佳权重及其小型 `.states`、实际训练配置、日志、数据划分和质量报告。原始数据不改动。失败或中断时不自动清理。
+
+旧运行可在训练结束后手动精简，命令会检查四个任务的最终轮保存记录和最佳权重：
+
+```bash
+python -m poi_recognizer.retention --run data/outputs/training/train-<时间>
+```
+
+如果旧训练进程仍在运行，可加 `--wait-pid <训练主进程PID>`，等待该进程结束后再检查；不会重启或干扰训练。已加载代码的训练进程不会即时采用新的终端显示逻辑，新启动的训练才生效。
 
 ## 看实际识别效果
 
@@ -79,7 +95,7 @@ train-<时间>/
 bash evaluate.sh --run data/outputs/training/train-<时间>
 ```
 
-打开输出报告的 `index.html`，看原图、预测文字、漏检、误检和错字。默认使用最终模型，抽取 100 张验证图；`--limit 0` 使用全部验证图。`curves.html` 查看 LSVT 训练曲线，`summary.json` 查看指标和耗时。更多选项见 `bash evaluate.sh --help`。
+打开输出报告的 `index.html`，看原图、预测文字、漏检、误检和错字。默认使用最终模型，至多抽取 100 张验证图。**精简目录只评估保留的约 1% 验证样例**，终端、报告和统计文件会标明这一范围；`--limit 0` 使用全部保留样例，不代表完整验证集。尚未精简的旧目录仍读取完整 `data/det_val.txt`。`curves.html` 查看 LSVT 训练曲线，`summary.json` 查看指标和耗时。更多选项见 `bash evaluate.sh --help`。
 
 同一批图比较训练前后效果：
 
@@ -96,7 +112,7 @@ ReCTS 从官方 train 中按标注文件名排序、seed=42 打乱，再按 **7:
 
 LSVT 固定编号：0–10499 训练，10500–11999 验证，12000–14999 测试预留。两种数据均先划分再检查图片，缺图不补号、不挪集合；测试集不参与训练和开发验证。
 
-检测保留有效多边形，忽略文字为 `###`；识别使用文字区域裁剪，未知字符、控制字符、超长文字及无效裁剪整条跳过并记录。原图、原始标签、官方源码、初始权重和已有产物只读。
+检测保留有效多边形，忽略文字为 `###`；识别使用文字区域裁剪，未知字符、控制字符、超长文字及无效裁剪整条跳过并记录。原图、原始标签、官方源码和初始权重只读；训练产物按上述规则精简。
 
 环境：Python 3.10、Paddle GPU 3.1.1、本地 PaddleOCR v3.2.0。源码默认在 `data/vendor/PaddleOCR-sparse`，官方权重在 `data/models/pretrained`。
 

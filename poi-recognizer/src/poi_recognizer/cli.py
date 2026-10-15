@@ -11,6 +11,7 @@ from typing import Sequence
 import yaml
 
 from .dataset import prepare_data
+from .retention import compact_run
 from .training import train, training_config
 
 
@@ -150,6 +151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 train(effective, source, stage_run, task, gpu)
                 logging.info("完成：%s；模型目录：%s", stage, stage_run / task)
+        stage = "精简训练产物，保留 1% 图像及配套标签样例"
+        compact_run(run)
         logging.info(
             "\n训练全部完成，用时 %.0f 秒\n最终检测权重：%s\n最终识别权重：%s",
             time.monotonic() - started,

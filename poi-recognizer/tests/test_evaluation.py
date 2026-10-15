@@ -134,16 +134,20 @@ def test_snapshot_rejects_concurrent_save(tmp_path: Path, monkeypatch: pytest.Mo
         evaluate.snapshot_models(run, output, source)
 
 
+@pytest.mark.parametrize("retained", [False, True])
 def test_synthetic_command_warmup_report_and_bad_image(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained: bool
 ) -> None:
     run, source = fake_run(tmp_path)
-    (run / "data").mkdir()
-    image = tmp_path / "gt_10500.jpg"
+    data = run / "data/examples" if retained else run / "data"
+    data.mkdir(parents=True)
+    if retained:
+        (data / "manifest.json").write_text('{"fraction": 0.01}')
+    image = data / "gt_10500.jpg"
     Image.new("RGB", (64, 32), "white").save(image)
     missing = tmp_path / "missing.jpg"
-    (run / "data/det_val.txt").write_text(
-        f'{image}\t{json.dumps([label(0, "超市"), label(10, "电话123456")])}\n{missing}\t[]\n'
+    (data / "det_val.txt").write_text(
+        f'{image.name}\t{json.dumps([label(0, "超市"), label(10, "电话123456")])}\n{missing}\t[]\n'
     )
     output = tmp_path / "report"
 
@@ -182,6 +186,10 @@ def test_synthetic_command_warmup_report_and_bad_image(
     assert result == 0
     summary = json.loads((output / "summary.json").read_text())
     assert summary["images"] == 1 and len(summary["skipped"]) == 1
+    assert summary["retained_examples_only"] is retained
+    if retained:
+        assert "NOT the full" in summary["scope"]
+        assert "约 1% 验证样例" in (output / "index.html").read_text()
     assert summary["end_to_end"]["f1"] == 1
     assert summary["counts"]["targets"] == summary["counts"]["predictions"] == 2
     assert "poi_filter" not in summary
@@ -360,4 +368,21 @@ def test_curves_include_losses_learning_rate_and_visible_small_changes(tmp_path:
     assert "非整轮均值" in page and "舍入" in page
     assert rows[-1]["lr"] == 0.00009
     assert rows[-1]["CTCLoss"] == 2.0
+    assert rows[-1]["loss"] == 3.0
+
+
+def test_curves_read_combined_epoch_summary_without_substituting_best_metric(
+    tmp_path: Path,
+) -> None:
+    run, _ = fake_run(tmp_path)
+    (run / "rec.log").write_text(
+        "rec train epoch: [2/50], loss: 3.0, ips: 20.0 | "
+        "cur metric, acc: 0.5, norm_edit_dis: 0.7, fps: 30.0 | "
+        "best metric, acc: 0.8, norm_edit_dis: 0.9, fps: 40.0, best_epoch: 1\n"
+    )
+    evaluate.training_curves(run, tmp_path)
+    rows = json.loads((tmp_path / "history.json").read_text())
+    assert rows[-1]["acc"] == 0.5
+    assert rows[-1]["norm_edit_dis"] == 0.7
+    assert rows[-1]["fps"] == 30.0
     assert rows[-1]["loss"] == 3.0

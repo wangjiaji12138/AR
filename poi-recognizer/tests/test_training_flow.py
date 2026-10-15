@@ -156,6 +156,7 @@ def test_live_progress_compact_logs_and_partial_epoch(tty: bool) -> None:
         "eval model:: 100%|##########| 2/2 [00:02<00:00]",
         "cur metric, acc: 0.8, norm_edit_dis: 0.9",
         "best metric, acc: 0.8, best_epoch: 1",
+        "[2026/10/15 16:36:53] ppocr INFO: save model in /example/latest",
         "epoch: [2/2], global_step: 4, loss: 0.5",
         "WARNING: example warning",
         "Traceback: example failure",
@@ -167,12 +168,18 @@ def test_live_progress_compact_logs_and_partial_epoch(tty: bool) -> None:
     assert "loss: 3.0" not in saved and "loss: 2.0" not in saved
     assert saved.count("train epoch:") == 2
     assert "loss: 1.0" in saved and "loss: 0.5" in saved
-    assert "eval epoch 1: 2/2" in saved
+    assert "eval epoch 1: 2/2" not in saved
     assert "1/2 [00:01" not in saved
     assert "acc: 0.8, norm_edit_dis: 0.9" in saved
     assert "WARNING: example warning" in saved and "Traceback: example failure" in saved
     assert "\r" not in saved
     assert ("\r" in terminal.getvalue()) == tty
+    epoch_summaries = [line for line in saved.splitlines() if "train epoch:" in line]
+    assert len(epoch_summaries) == 2
+    assert "cur metric, acc: 0.8" in epoch_summaries[0]
+    assert "best_epoch: 1" in epoch_summaries[0]
+    assert "save model in" not in terminal.getvalue()
+    assert terminal.getvalue().count("cur metric,") == 1
 
 
 def test_rects_lines_ignore_flags_and_stable_split(tmp_path: Path) -> None:
@@ -302,6 +309,18 @@ def test_two_stage_training_handoff(
 
     monkeypatch.setattr(cli, "prepare_data", prepare)
     monkeypatch.setattr(cli, "train", fake_train)
+    compacted = []
+
+    def compact(run: Path) -> None:
+        assert len(events) == 6
+        assert all(
+            (stage / task / "best_accuracy.pdparams").is_file()
+            for stage in (run / "rects", run)
+            for task in ("det", "rec")
+        )
+        compacted.append(run)
+
+    monkeypatch.setattr(cli, "compact_run", compact)
     arguments = ["--config", str(config)] + (["--smoke"] if smoke else [])
     assert cli.main(arguments) == (1 if missing_transfer else 0)
     assert events[:3] == [
@@ -311,6 +330,8 @@ def test_two_stage_training_handoff(
     ]
     if missing_transfer:
         assert len(events) == 3
+        assert not compacted
     else:
         assert events[3] == ("prepare", "lsvt")
         assert [event[-1] for event in events[4:]] == ["det", "rec"]
+        assert len(compacted) == 1

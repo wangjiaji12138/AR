@@ -212,7 +212,13 @@ def write_report(output: Path, records: list[dict[str, Any]], summary: dict[str,
 CARDS
 <script>function filter(){for(const a of document.querySelectorAll('article'))a.hidden=!(a.dataset.name.includes(document.querySelector('#search').value)&&a.dataset.status.includes(document.querySelector('#status').value));}for(const e of document.querySelectorAll('input,select'))e.addEventListener('input',filter);for(const im of document.images)im.onclick=()=>window.open(im.src,'_blank');</script></html>"""
     page = page.replace(
-        "FILTER_NOTICE", "保留所有可辨认文字，不按 POI、电话号码、价格或促销内容筛选。"
+        "FILTER_NOTICE",
+        "保留所有可辨认文字，不按 POI、电话号码、价格或促销内容筛选。"
+        + (
+            " 此目录已精简，本报告仅使用保留的约 1% 验证样例，不代表完整验证集。"
+            if summary.get("retained_examples_only")
+            else ""
+        ),
     )
     page = page.replace("SUMMARY", escape(json.dumps(summary, ensure_ascii=False, indent=2)))
     page = page.replace("OPTIONS", options).replace("CARDS", "".join(cards))

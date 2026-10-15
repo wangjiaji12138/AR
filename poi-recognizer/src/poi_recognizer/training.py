@@ -37,7 +37,7 @@ def training_config(
         save_epoch_step=epochs,
         eval_batch_step=[0, max(1, math.ceil(count / batch_size))],
         eval_batch_epoch=1,
-        print_batch_step=1,
+        print_batch_step=1,  # Feed live progress; TrainingOutput emits one summary per epoch.
         use_visualdl=False,
     )
     config["Optimizer"]["lr"].update(learning_rate=learning_rate, warmup_epoch=0)

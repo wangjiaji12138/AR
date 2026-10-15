@@ -140,10 +140,11 @@ def training_curves(run: Path, output: Path) -> dict[str, Any]:
                     }
                     batches.append(last_train)
                 if "cur metric," in line:
+                    current = line.split("cur metric,", 1)[1].split(" | best metric,", 1)[0]
                     metrics = {
                         k: float(v)
                         for k, v in re.findall(
-                            r"\b(precision|recall|hmean|acc|norm_edit_dis|fps): ([\d.]+)", line
+                            r"\b(precision|recall|hmean|acc|norm_edit_dis|fps): ([\d.]+)", current
                         )
                     }
                     rows.append({"task": task, "epoch": epoch, **last_train, **metrics})
@@ -324,12 +325,17 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if any(output == path or path in output.parents for path in protected):
             raise ValueError("Output must be outside the training run, raw data, models and source")
+        data = run / "data"
+        retained_examples = (data / "examples/manifest.json").is_file()
+        if retained_examples:
+            data /= "examples"
+            logging.warning("此训练目录已精简：评估仅使用保留的约 1% 验证样例，非完整验证集")
         examples = []
-        for line in (run / "data/det_val.txt").read_text().splitlines():
+        for line in (data / "det_val.txt").read_text().splitlines():
             path, labels = line.split("\t", 1)
             image_path = Path(path)
             if not image_path.is_absolute():
-                image_path = run / "data" / image_path
+                image_path = data / image_path
             examples.append((image_path, json.loads(labels)))
         if not examples:
             raise ValueError("No validation images")
@@ -410,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             "selected": len(examples),
             "skipped": skipped,
             "scope": "Prepared detection validation images; all-ignore/invalid images excluded during preparation. Unknown/long texts retained. Sampled unless limit=0.",
+            "retained_examples_only": retained_examples,
             "counts": counts,
             "detection": quality(counts, "detected"),
             "end_to_end": quality(counts, "correct"),
@@ -434,6 +441,11 @@ def main(argv: list[str] | None = None) -> int:
             "run": str(run),
             "seed": args.seed,
         }
+        if retained_examples:
+            summary["scope"] = (
+                "Only the retained approximately 1% validation examples; NOT the full "
+                "validation set, including when limit=0. Not a full validation benchmark."
+            )
         for record in records:
             ident = record["id"]
             with Image.open(output / f"images/{ident}-original.jpg") as rgb:
