@@ -1,7 +1,7 @@
 {
   "project_root": "..",
-  "rects_images": "data/photo-lsvt/rects/img",
-  "rects_labels": "data/photo-lsvt/rects/gt",
+  "rects_images": "data/photo-rects/train/img",
+  "rects_labels": "data/photo-rects/train/gt",
   "rects_epochs": 50,
   "images": "data/photo-lsvt/train_images",
   "labels": "data/photo-lsvt/train_labels.json",

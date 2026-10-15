@@ -195,12 +195,21 @@ def test_rects_lines_ignore_flags_and_stable_split(tmp_path: Path) -> None:
     dictionary.write_text("店\n")
     first = tmp_path / "first"
     report = prepare_data(images, labels, first, dictionary, 25, dataset="rects")
-    assert report["planned"] == {"train": 9, "val": 1}
-    assert report["train"]["rec"] == 9 and report["val"]["rec"] == 1
-    assert report["excluded"] == {"ignored_text": 10, "invalid_polygon": 10}
+    assert report["planned"] == {"train": 7, "val": 1, "test": 2}
+    assert report["train"]["rec"] == 7 and report["val"]["rec"] == 1
+    assert report["excluded"] == {"ignored_text": 8, "invalid_polygon": 8}
     train_ids = (first / "train_ids.txt").read_text().splitlines()
     val_ids = (first / "val_ids.txt").read_text().splitlines()
+    test_ids = (first / "test_ids.txt").read_text().splitlines()
     assert not set(train_ids) & set(val_ids)
+    assert not set(test_ids) & (set(train_ids) | set(val_ids))
+    assert len(set(train_ids + val_ids + test_ids)) == 10
+    assert not (first / "det_test.txt").exists()
+    for image_id in test_ids:
+        assert not list((first / "crops").glob(f"{image_id}_*.jpg"))
+        # Held-out labels and images must never be read during preparation.
+        (labels / f"{image_id}.json").write_text("invalid JSON")
+        (images / f"{image_id}.jpg").unlink()
     detections = [
         json.loads(row.split("\t")[1]) for row in (first / "det_train.txt").read_text().splitlines()
     ]
@@ -210,9 +219,10 @@ def test_rects_lines_ignore_flags_and_stable_split(tmp_path: Path) -> None:
     (images / f"{train_ids[0]}.jpg").unlink()
     second = tmp_path / "second"
     changed = prepare_data(images, labels, second, dictionary, 25, dataset="rects")
-    assert changed["train"]["images"] == 8
+    assert changed["train"]["images"] == 6
     assert (second / "train_ids.txt").read_text().splitlines() == train_ids
     assert (second / "val_ids.txt").read_text().splitlines() == val_ids
+    assert (second / "test_ids.txt").read_text().splitlines() == test_ids
 
 
 @pytest.mark.parametrize("missing_transfer", [False, True])
@@ -242,7 +252,7 @@ def test_two_stage_training_handoff(
         (weights / f"PP-OCRv5_mobile_{task}_pretrained.pdparams").touch()
     for directory in ("images", "rects_images", "rects_labels"):
         (tmp_path / directory).mkdir()
-    for index in range(2):
+    for index in range(3):
         (tmp_path / f"rects_labels/{index}.json").write_text("{}")
     (tmp_path / "labels.json").write_text("{}")
     config = tmp_path / "train.json"

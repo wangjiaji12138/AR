@@ -46,8 +46,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for key in ("images", "rects_images", "rects_labels"):
             if not paths[key].is_dir():
                 raise FileNotFoundError(f"Directory does not exist ({key}): {paths[key]}")
-        if len(list(paths["rects_labels"].glob("*.json"))) < 2:
-            raise ValueError("rects_labels must contain per-image ReCTS JSON annotations")
+        if len(list(paths["rects_labels"].glob("*.json"))) < 3:
+            raise ValueError("rects_labels must contain at least three per-image ReCTS JSON labels")
         dictionary = source / "ppocr/utils/dict/ppocrv5_dict.txt"
         required = [paths["labels"], dictionary, source / "tools/train.py"]
         for task in ("det", "rec"):

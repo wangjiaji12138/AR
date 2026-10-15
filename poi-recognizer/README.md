@@ -20,15 +20,16 @@
 只需修改 [configs/train.json](configs/train.json)，路径相对 `poi-recognizer/`。默认目录：
 
 ```text
-data/photo-lsvt/
-├── rects/
-│   ├── img/    # ReCTS 训练图片
-│   └── gt/     # ReCTS 训练标注，每张图一个 JSON
-├── train_images/
-└── train_labels.json
+data/
+├── photo-rects/train/
+│   ├── img/    # ReCTS 有标注的训练图片
+│   └── gt/     # 每张图一个 JSON
+└── photo-lsvt/
+    ├── train_images/
+    └── train_labels.json
 ```
 
-**当前默认 ReCTS 目录尚不存在，需要先放好数据或修改 `rects_images`、`rects_labels`。** ReCTS 标注使用 `lines`，不使用 `chars`。
+默认配置已指向上述数据目录。ReCTS 只使用官方 train 中的有标注数据，标注读取 `lines`，不使用 `chars`；无标注的官方 test 不参与。
 
 常改参数只有这几个：
 
@@ -91,7 +92,9 @@ bash evaluate.sh --run data/outputs/training/train-<时间> --weights best --lim
 
 ## 数据规则与代码检查
 
-ReCTS 按标注文件名排序、seed=42 打乱，90% 训练、10% 验证。LSVT 固定编号：0–10499 训练，10500–11999 验证，12000–14999 测试预留。缺图不补号，测试集不参与训练。
+ReCTS 从官方 train 中按标注文件名排序、seed=42 打乱，再按 **7:1:2** 划分训练、验证和测试集。现有 20000 份标注对应 14000/2000/4000 张；各集合编号保存到 `rects/data/train_ids.txt`、`val_ids.txt`、`test_ids.txt`。测试集只预留编号，训练准备不读取其图片或标注，也不生成测试裁剪。
+
+LSVT 固定编号：0–10499 训练，10500–11999 验证，12000–14999 测试预留。两种数据均先划分再检查图片，缺图不补号、不挪集合；测试集不参与训练和开发验证。
 
 检测保留有效多边形，忽略文字为 `###`；识别使用文字区域裁剪，未知字符、控制字符、超长文字及无效裁剪整条跳过并记录。原图、原始标签、官方源码、初始权重和已有产物只读。
 

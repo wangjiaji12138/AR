@@ -44,11 +44,12 @@ def prepare_data(
         splits = {key: [f"gt_{n}" for n in ids] for key, ids in SPLITS.items()}
     elif dataset == "rects":
         ids = sorted(path.stem for path in labels.glob("*.json"))
-        if len(ids) < 2:
-            raise ValueError(f"ReCTS needs at least two per-image JSON labels: {labels}")
+        if len(ids) < 3:
+            raise ValueError(f"ReCTS needs at least three per-image JSON labels: {labels}")
         random.Random(42).shuffle(ids)
-        boundary = min(len(ids) - 1, max(1, int(len(ids) * 0.9)))
-        splits = {"train": ids[:boundary], "val": ids[boundary:]}
+        train_end = min(len(ids) - 2, max(1, len(ids) * 7 // 10))
+        val_end = train_end + max(1, len(ids) // 10)
+        splits = {"train": ids[:train_end], "val": ids[train_end:val_end], "test": ids[val_end:]}
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
     vocabulary = set(dictionary.read_text(encoding="utf-8").splitlines()) | {" "}
