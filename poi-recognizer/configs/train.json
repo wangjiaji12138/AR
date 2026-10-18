@@ -2,14 +2,15 @@
   "project_root": "..",
   "rects_images": "data/photo-rects/train/img",
   "rects_labels": "data/photo-rects/train/gt",
-  "rects_epochs": 50,
   "images": "data/photo-lsvt/train_images",
   "labels": "data/photo-lsvt/train_labels.json",
   "paddleocr_source": "data/vendor/PaddleOCR-sparse",
   "pretrained": "data/models/pretrained",
   "output": "data/outputs/training",
   "epochs": 50,
-  "batch_size": 8,
+  "sample_fraction": 0.1,
+  "batch_size": 16,
+  "amp": true,
   "learning_rate": 0.0001,
-  "gpu": 0
+  "gpu": 1
 }

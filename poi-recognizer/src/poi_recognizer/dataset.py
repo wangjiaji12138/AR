@@ -11,7 +11,23 @@ import cv2
 from .errors import POIError
 from .geometry import crop_text, read_image, validate_polygon
 
-SPLITS = {"train": range(0, 10500), "val": range(10500, 12000), "test": range(12000, 15000)}
+
+def sampled_splits(ids: list[str], fraction: float = 0.1) -> dict[str, list[str]]:
+    """Select original images first, then make a new deterministic 7:1:2 split."""
+    if not 0 < fraction <= 1:
+        raise ValueError("sample_fraction must be in (0, 1]")
+    selected = sorted(ids)
+    random.Random(42).shuffle(selected)
+    selected = selected[: int(len(selected) * fraction)]
+    if len(selected) < 10:
+        raise ValueError("At least ten sampled images are required for a 7:1:2 split")
+    train_end = len(selected) * 7 // 10
+    val_end = train_end + len(selected) // 10
+    return {
+        "train": selected[:train_end],
+        "val": selected[train_end:val_end],
+        "test": selected[val_end:],
+    }
 
 
 def recognition_exclusion(text: str, vocabulary: set[str], max_length: int) -> str | None:
@@ -36,22 +52,21 @@ def prepare_data(
     max_length: int,
     smoke: bool = False,
     dataset: str = "lsvt",
+    sample_fraction: float = 0.1,
 ) -> dict[str, Any]:
     """Prepare LSVT or native ReCTS line labels, splitting before checking images."""
     annotations = {}
     if dataset == "lsvt":
         annotations = json.loads(labels.read_text(encoding="utf-8"))
-        splits = {key: [f"gt_{n}" for n in ids] for key, ids in SPLITS.items()}
+        # Only the locally supplied first 15,000 labeled images form this experiment's pool.
+        ids = [f"gt_{n}" for n in range(15000)]
     elif dataset == "rects":
         ids = sorted(path.stem for path in labels.glob("*.json"))
         if len(ids) < 3:
             raise ValueError(f"ReCTS needs at least three per-image JSON labels: {labels}")
-        random.Random(42).shuffle(ids)
-        train_end = min(len(ids) - 2, max(1, len(ids) * 7 // 10))
-        val_end = train_end + max(1, len(ids) // 10)
-        splits = {"train": ids[:train_end], "val": ids[train_end:val_end], "test": ids[val_end:]}
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
+    splits = sampled_splits(ids, sample_fraction)
     vocabulary = set(dictionary.read_text(encoding="utf-8").splitlines()) | {" "}
     output.mkdir(parents=True, exist_ok=False)
     crops = output / "crops"
@@ -59,6 +74,10 @@ def prepare_data(
     report: dict[str, Any] = {
         "dataset": dataset,
         "smoke": smoke,
+        "source_images": len(ids),
+        "sample_fraction": sample_fraction,
+        "seed": 42,
+        "split_policy": "sample original images, then resplit 7:1:2; not the historical split",
         "planned": {k: len(v) for k, v in splits.items()},
     }
     reasons: Counter[str] = Counter()

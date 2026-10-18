@@ -11,12 +11,12 @@ import pytest
 import yaml
 from PIL import Image
 
-from poi_recognizer.dataset import prepare_data, recognition_exclusion
+from poi_recognizer.dataset import prepare_data, recognition_exclusion, sampled_splits
 from poi_recognizer.geometry import crop_text, validate_polygon
 from poi_recognizer.training import train, training_config
 
 
-def test_fixed_splits_missing_images_and_whole_label_filtering(tmp_path: Path) -> None:
+def test_sampled_splits_missing_images_and_whole_label_filtering(tmp_path: Path) -> None:
     images = tmp_path / "images"
     images.mkdir()
     polygon = [[1, 1], [30, 1], [30, 10], [1, 10]]
@@ -24,9 +24,11 @@ def test_fixed_splits_missing_images_and_whole_label_filtering(tmp_path: Path) -
         f"gt_{i}": [{"points": polygon, "transcription": "店", "illegibility": False}]
         for i in range(15000)
     }
-    labels["gt_10500"].append({"points": polygon, "transcription": "店外", "illegibility": False})
-    for number in (10499, 10500, 11999, 12000):
-        Image.new("RGB", (32, 16), color=(number % 255, 20, 30)).save(images / f"gt_{number}.jpg")
+    splits = sampled_splits(list(labels))
+    train_id, val_id, test_id = (splits[key][0] for key in ("train", "val", "test"))
+    labels[val_id].append({"points": polygon, "transcription": "店外", "illegibility": False})
+    for ident in (train_id, val_id, test_id):
+        Image.new("RGB", (32, 16)).save(images / f"{ident}.jpg")
     label_path = tmp_path / "labels.json"
     label_path.write_text(json.dumps(labels))
     before = label_path.read_bytes()
@@ -34,18 +36,31 @@ def test_fixed_splits_missing_images_and_whole_label_filtering(tmp_path: Path) -
     dictionary.write_text("店\n")
     output = tmp_path / "prepared"
     report = prepare_data(images, label_path, output, dictionary, 25)
-    assert report["planned"] == {"train": 10500, "val": 1500, "test": 3000}
-    assert report["train"]["used_ids"] == ["gt_10499"]
-    assert report["val"]["used_ids"] == ["gt_10500", "gt_11999"]
+    assert report["planned"] == {"train": 1050, "val": 150, "test": 300}
+    assert report["sample_fraction"] == 0.1
+    assert report["train"]["used_ids"] == [train_id]
+    assert report["val"]["used_ids"] == [val_id]
     assert report["excluded"]["unknown_character"] == 1
     assert "店外" in (output / "det_val.txt").read_text()
     assert "店外" not in (output / "rec_val.txt").read_text()
-    assert "gt_12000" not in (output / "det_val.txt").read_text()
-    assert not list((output / "crops").glob("gt_12000*"))
-    assert (output / "test_ids.txt").read_text().splitlines()[0] == "gt_12000"
+    assert test_id not in (output / "det_val.txt").read_text()
+    assert not list((output / "crops").glob(f"{test_id}*"))
+    assert (output / "test_ids.txt").read_text().splitlines() == splits["test"]
     assert label_path.read_bytes() == before
     with pytest.raises(FileExistsError):
         prepare_data(images, label_path, output, dictionary, 25)
+
+
+def test_tenth_sampling_is_deterministic_disjoint_and_not_crop_sampling() -> None:
+    ids = [f"image_{i:05d}" for i in range(20000)]
+    splits = sampled_splits(ids)
+    assert {k: len(v) for k, v in splits.items()} == dict(train=1400, val=200, test=400)
+    assert sampled_splits(list(reversed(ids))) == splits
+    flattened = [ident for group in splits.values() for ident in group]
+    assert len(set(flattened)) == 2000
+    assert set(flattened) <= set(ids)
+    with pytest.raises(ValueError):
+        sampled_splits(ids, 0)
 
 
 @pytest.mark.parametrize(
@@ -104,8 +119,15 @@ def test_config_and_subprocess_failure(
     assert config["Eval"]["loader"]["num_workers"] == 4
     assert config["Global"]["eval_batch_step"] == [0, 2]
     assert config["Global"]["eval_batch_epoch"] == 1
-    assert config["Train"]["sampler"]["scales"] == [[320, 48]]
-    assert config["Train"]["dataset"]["transforms"] == [{"RecAug": None}]
+    assert "sampler" not in config["Train"]
+    assert config["Global"]["use_amp"] is True
+    assert config["Global"]["amp_level"] == "O1"
+    assert config["Eval"]["loader"]["batch_size_per_card"] == 2
+    assert config["Eval"]["loader"]["collate_fn"] == "RecognitionCollator"
+    assert config["Train"]["dataset"]["transforms"] == [
+        {"RecAug": None},
+        {"DynamicRecResize": None},
+    ]
     assert config["Eval"]["dataset"]["label_file_list"] == [str(run / "data/rec_val.txt")]
 
     def fail(command: list[str], **kwargs: Any) -> None:
@@ -201,7 +223,9 @@ def test_rects_lines_ignore_flags_and_stable_split(tmp_path: Path) -> None:
     dictionary = tmp_path / "dict.txt"
     dictionary.write_text("店\n")
     first = tmp_path / "first"
-    report = prepare_data(images, labels, first, dictionary, 25, dataset="rects")
+    report = prepare_data(
+        images, labels, first, dictionary, 25, dataset="rects", sample_fraction=1.0
+    )
     assert report["planned"] == {"train": 7, "val": 1, "test": 2}
     assert report["train"]["rec"] == 7 and report["val"]["rec"] == 1
     assert report["excluded"] == {"ignored_text": 8, "invalid_polygon": 8}
@@ -225,7 +249,9 @@ def test_rects_lines_ignore_flags_and_stable_split(tmp_path: Path) -> None:
     # Missing images cannot change membership or fill gaps from validation.
     (images / f"{train_ids[0]}.jpg").unlink()
     second = tmp_path / "second"
-    changed = prepare_data(images, labels, second, dictionary, 25, dataset="rects")
+    changed = prepare_data(
+        images, labels, second, dictionary, 25, dataset="rects", sample_fraction=1.0
+    )
     assert changed["train"]["images"] == 6
     assert (second / "train_ids.txt").read_text().splitlines() == train_ids
     assert (second / "val_ids.txt").read_text().splitlines() == val_ids
@@ -284,6 +310,7 @@ def test_two_stage_training_handoff(
     def prepare(*args: Any, **kwargs: Any) -> dict[str, Any]:
         events.append(("prepare", kwargs["dataset"]))
         assert args[5] is smoke
+        assert kwargs["sample_fraction"] == 0.1
         output = args[2]
         output.mkdir()
         for task in ("det", "rec"):
@@ -295,9 +322,7 @@ def test_two_stage_training_handoff(
         initial = Path(effective["Global"]["pretrained_model"])
         assert initial.is_file()
         assert effective["Global"]["checkpoints"] is None
-        assert effective["Global"]["epoch_num"] == (
-            1 if smoke else (3 if run.name == "rects" else 7)
-        )
+        assert effective["Global"]["epoch_num"] == (1 if smoke else 7)
         assert effective["Train"]["loader"]["batch_size_per_card"] == (2 if smoke else 8)
         if run.name == "rects":
             assert initial == weights / f"PP-OCRv5_mobile_{task}_pretrained.pdparams"
@@ -309,18 +334,6 @@ def test_two_stage_training_handoff(
 
     monkeypatch.setattr(cli, "prepare_data", prepare)
     monkeypatch.setattr(cli, "train", fake_train)
-    compacted = []
-
-    def compact(run: Path) -> None:
-        assert len(events) == 6
-        assert all(
-            (stage / task / "best_accuracy.pdparams").is_file()
-            for stage in (run / "rects", run)
-            for task in ("det", "rec")
-        )
-        compacted.append(run)
-
-    monkeypatch.setattr(cli, "compact_run", compact)
     arguments = ["--config", str(config)] + (["--smoke"] if smoke else [])
     assert cli.main(arguments) == (1 if missing_transfer else 0)
     assert events[:3] == [
@@ -330,8 +343,6 @@ def test_two_stage_training_handoff(
     ]
     if missing_transfer:
         assert len(events) == 3
-        assert not compacted
     else:
         assert events[3] == ("prepare", "lsvt")
         assert [event[-1] for event in events[4:]] == ["det", "rec"]
-        assert len(compacted) == 1

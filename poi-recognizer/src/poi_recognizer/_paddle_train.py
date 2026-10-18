@@ -10,8 +10,14 @@ def main() -> None:
     source = Path(sys.argv[1])
     sys.path.insert(0, str(source))
     sys.path.insert(0, str(source / "tools"))
+    from ppocr.data import collate_fn, imaug
     from ppocr.utils.logging import get_logger
 
+    from poi_recognizer.preprocessing import DynamicRecResize, RecognitionCollator
+
+    # Extend only the official data operator registry; vendor files/models stay unchanged.
+    imaug.DynamicRecResize = DynamicRecResize
+    collate_fn.RecognitionCollator = RecognitionCollator
     get_logger()
     sys.argv = [str(source / "tools/train.py"), *sys.argv[2:]]
     runpy.run_path(sys.argv[0], run_name="__main__")

@@ -1,49 +1,12 @@
 # POI-Recognizer
 
-用 PaddleOCR 的 PP-OCRv5 mobile 训练两个模型：**det 找文字位置，rec 读出文字**。
+PP-OCRv5 mobile：det 找文字位置，rec 读取文字。一个命令依次执行 **ReCTS 检测/识别训练 → LSVT 检测/识别微调**。ReCTS 从官方预训练权重开始，LSVT 从本次 ReCTS 最佳权重开始，第二阶段重置优化器；任何任务失败即停止。
 
-整个训练就是下面六步，一个命令顺序执行：
+2026-10-18 按用户审视后的范围重构：统一预处理、简化训练、GPU 执行优化、两个数据集各取 1/10 后重新划分。此前完整评估重建、20% 微调、多组对照、额外增强、长度扩展和自动早停方案不再实施。[to_check.md](to_check.md) 保留为历史检查记录，其中旧数据比例和划分不适用于本次重训。
 
-```text
-1. 准备 ReCTS 数据
-2. ReCTS 训练 det ← 官方预训练检测权重
-3. ReCTS 训练 rec ← 官方预训练识别权重
-4. 准备 LSVT 数据（train_images + train_labels.json）
-5. LSVT 微调 det  ← 第 2 步的最佳权重
-6. LSVT 微调 rec  ← 第 3 步的最佳权重
-```
+## 训练
 
-第二阶段重新初始化优化器。任何一步失败就停止；重跑会新建目录，从第一步开始。
-
-## 先配置数据
-
-只需修改 [configs/train.json](configs/train.json)，路径相对 `poi-recognizer/`。默认目录：
-
-```text
-data/
-├── photo-rects/train/
-│   ├── img/    # ReCTS 有标注的训练图片
-│   └── gt/     # 每张图一个 JSON
-└── photo-lsvt/
-    ├── train_images/
-    └── train_labels.json
-```
-
-默认配置已指向上述数据目录。ReCTS 只使用官方 train 中的有标注数据，标注读取 `lines`，不使用 `chars`；无标注的官方 test 不参与。
-
-常改参数只有这几个：
-
-| 配置项 | 含义 | 默认值 |
-| --- | --- | --- |
-| `rects_epochs` | ReCTS 的 det、rec 各训练多少轮 | 50 |
-| `epochs` | LSVT 的 det、rec 各训练多少轮 | 50 |
-| `batch_size` | 每个模型的训练 batch | 8 |
-| `learning_rate` | 学习率 | 0.0001 |
-| `gpu` | 物理 GPU 编号 | 0 |
-
-默认是 **4 个训练任务，每个 50 轮**。沿用已有 `myenv` 环境、本地 PaddleOCR 源码和官方权重，入口不会安装或下载。
-
-## 启动
+使用已有 Conda `myenv`（Python 3.10、Paddle GPU 3.1.1）和本地 PaddleOCR v3.2.0，不安装或下载依赖。
 
 ```bash
 conda activate myenv
@@ -51,70 +14,88 @@ cd /data2/wangjiaji/AR/poi-recognizer
 bash train.sh
 ```
 
-需要先检查能否跑通时，手动执行 `bash train.sh --smoke`：每阶段 train/val 各至多四张可解码图片，每个模型一轮，batch=2。这不能代表训练效果。
+参数统一放在 [configs/train.json](configs/train.json)：
 
-终端显示当前第几步、初始权重、日志位置；每轮训练和验证用一条动态进度条显示，轮结束后只输出一行训练/验证指标摘要。警告和错误仍立即显示。日志不保存逐 batch 刷新；重定向到文件时不输出动态进度条。Ctrl+C 中断。训练配置统一维护在 `configs/train.json`。
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `epochs` | 50 | 四个训练任务各 50 轮 |
+| `sample_fraction` | 0.1 | 各数据集抽取的原图比例 |
+| `batch_size` | 16 | 训练 batch 和识别验证 batch；检测验证为 1 |
+| `learning_rate` | 0.0001 | 沿用简单统一学习率，无参数搜索 |
+| `amp` | true | Paddle 原生 O1 混合精度和动态 loss scaling；关闭可回到 FP32 |
+| `gpu` | 1 | 物理 GPU 编号，可用 `bash train.sh --gpu 2` 覆盖 |
 
-## 训练结果在哪
-
-每次运行写入独立目录 `data/outputs/training/train-<时间>/`：
+数据路径相对本项目目录：
 
 ```text
-train-<时间>/
-├── settings.json         # 本次配置
-├── rects/                # 第一阶段的样例、配置、日志和最佳模型
-├── data/
-│   ├── examples/         # 约 1% 图像和配套检测/识别标签（含 train/val）
-│   │   ├── images/       # 抽取的检测原图副本
-│   │   ├── crops/        # 抽取的识别裁剪图
-│   │   ├── det_*.txt / rec_*.txt
-│   │   └── manifest.json # 原始/保留数量、抽样比例和 seed
-│   └── …                 # report.json、skipped.jsonl、完整划分编号
-├── det.yml / rec.yml     # 实际交给 PaddleOCR 的配置
-├── det.log / rec.log     # 每轮摘要、指标和必要诊断
-└── det/ / rec/           # 最终检测/识别模型
+data/photo-rects/train/img/       # ReCTS 图片
+data/photo-rects/train/gt/        # 逐图 JSON，使用 lines
+data/photo-lsvt/train_images/    # 当前本地提供 gt_0 至 gt_14999
+data/photo-lsvt/train_labels.json
+data/vendor/PaddleOCR-sparse/    # 官方源码，只读
+data/models/pretrained/         # 官方 det/rec 权重，只读
 ```
 
-最终权重为 `det/best_accuracy.pdparams` 和 `rec/best_accuracy.pdparams`；ReCTS 的两份最佳权重也保留。数据过滤原因见各阶段 `data/report.json` 和 `data/skipped.jsonl`。
+`bash train.sh --smoke` 使用同样的抽样划分，每阶段 train/val 各至多四张可解码原图，四个任务各一轮、batch=2。它验证训练衔接，不代表模型质量。训练和验证显示进度，文件保留每轮摘要和诊断；Ctrl+C 中断，重跑会新建目录并重新开始。
 
-训练时仍使用完整数据，并临时保存检查点。**四个训练任务全部成功后自动精简**：每阶段、每个任务、每个 train/val 集合独立按 seed=42 抽取 1%（向上取整，非空集合至少一条），保留图像及配套标签，标签中的图片路径相对 `examples/`。删除全量裁剪缓存、全量训练/验证标签、`latest.*`、`iter_epoch_*`、优化器、重复的 `best_model/` 和模型目录内的重复配置；保留最佳权重及其小型 `.states`、实际训练配置、日志、数据划分和质量报告。原始数据不改动。失败或中断时不自动清理。
+## 1/10 抽样与重新划分
 
-旧运行可在训练结束后手动精简，命令会检查四个任务的最终轮保存记录和最佳权重：
+先对原图 ID 排序，再用 seed=42 打乱，取 `floor(原图数量 × 0.1)` 张，然后按 7:1:2 划分。两种数据独立抽样；检测和识别使用相同原图集合。
+
+| 数据集 | 抽样来源 | 选中原图 | train | val | test |
+| --- | --- | --- | --- | --- | --- |
+| ReCTS | 官方有标注 train 的 20000 张 | 2000 | 1400 | 200 | 400 |
+| LSVT | 本地提供的编号 0–14999，共 15000 张 | 1500 | 1050 | 150 | 300 |
+
+LSVT 标签文件有 30000 条图片记录，但本地图片仅提供前 15000 张，本轮以这 15000 张为抽样来源。这里的 1/10 **包含重新划分出的训练、验证、测试集合**，并非只缩减旧训练集。识别裁剪数量由选中原图中的有效实例决定，不要求恰好为旧裁剪数量的 1/10。
+
+先抽样、划分，再检查图片和标签。缺图/坏图、无效几何、忽略文字及识别不可训练标签记录到报告，不补样、不跨集合挪动。测试只保留 ID，不生成标签或裁剪，不参与训练和调参。原始数据和旧产物只读。
+
+**本次划分与历史划分不同**，指标不能直接与旧验证结果比较。重新训练从官方预训练权重开始，不使用曾在旧训练集上训练过的项目权重来评估新的留出集。
+
+## 统一预处理与 GPU 优化
+
+检测训练内验证和整图推理都使用最长边上限 960、相同官方缩放/后处理规则；训练仍保留官方随机裁剪增强。
+
+识别训练、验证和整图推理共用 [preprocessing.py](src/poi_recognizer/preprocessing.py)：高度 48，等比例缩放，宽度至少 320 并向上对齐至 8，右侧补零。宽文本按需扩宽，训练/验证批内补齐到最大宽度；推理沿用官方宽高比排序减少 padding。未设硬截断宽度，极宽输入会增加显存消耗，可先减小 batch。
+
+标注框和预测框使用同一裁剪函数：四点框透视裁剪，多点框使用最小旋转外接矩形；高宽比达到 1.5 时旋转。它不能拉直弯曲文字。识别保持原字典、23 字符标签上限及保守的 40 时间步 CTC 过滤，不扩展模型/标签长度；动态宽度解决图像压缩问题，不自动放开标签长度。仍保留 `RecAug`，不恢复拼接、CopyPaste 或增加扰动。
+
+GPU 改动保持简单：训练启用原生 O1 混合精度；识别验证从逐条改为批量；保留数据加载 worker 和 CPU 线程限制；整图推理复用已加载的预测器，默认不额外进行每阶段 GPU 全局同步。是否提速、质量是否变化以真实运行结果为准，A800 结果不代表路端设备。
+
+## 输出
+
+每次运行保存到新的 `data/outputs/training/train-<时间>/`：
+
+```text
+settings.json                   # 本次配置
+rects/data/                     # ReCTS 划分、标签、裁剪、过滤报告
+rects/det.yml / rec.yml          # 实际训练配置
+rects/det.log / rec.log
+rects/det/ / rec/                # ReCTS 最佳权重与原生检查点
+data/                           # LSVT 划分、标签、裁剪、过滤报告
+det.yml / rec.yml
+det.log / rec.log
+det/ / rec/                     # 最终模型
+```
+
+最佳权重为各任务目录的 `best_accuracy.pdparams`。每个 `data/` 保存 `train_ids.txt / val_ids.txt / test_ids.txt`、`det_*.txt / rec_*.txt`、`report.json` 和 `skipped.jsonl`。
+
+**训练结束后不再自动抽取 1% 或删除标签/裁剪**，这次数据本身已缩小，保留即可复查。历史 `retention` 工具仍在，仅供旧运行兼容，不属于新训练流程。
+
+## 查看效果
 
 ```bash
-python -m poi_recognizer.retention --run data/outputs/training/train-<时间>
+bash evaluate.sh --run data/outputs/training/train-<时间> --gpu 1 --limit 0
 ```
 
-如果旧训练进程仍在运行，可加 `--wait-pid <训练主进程PID>`，等待该进程结束后再检查；不会重启或干扰训练。已加载代码的训练进程不会即时采用新的终端显示逻辑，新启动的训练才生效。
+报告 `index.html` 展示原图、预测、漏检、误检和错字，`curves.html` 为训练曲线。新运行的 `--limit 0` 使用本次重新划分后的全部有效验证图；默认 `--limit 100` 最多 100 张。历史已精简目录仍明确标记为约 1% 保留样例，未增加旧数据恢复入口。
 
-## 看实际识别效果
+检测与整图指标沿用现有多边形 IoU≥0.5 一对一匹配，文字去普通空格后整段比较；训练日志中的 rec Acc 是 GT 裁剪准确率，不能代替整图质量。没有新增店名或地图 POI 匹配计分。
 
-训练结束后手动运行：
+推理默认 FP32、识别 batch=16，可用 `--rec-batch 6` 调整。`--det-side-len` 仅供显式实验，改变后不再与默认训练验证分辨率一致。`--profile-stages` 开启额外同步以获得分阶段计时；默认仅报告完整 OCR 和读图耗时。官方预测器将结果复制到 CPU 后返回，因此完整 OCR 计时包含已完成的计算与前后处理；导出、初始化、预热、画图和报告不计入。每次评估仍独立导出、初始化一次，图片间复用预测器，不新增服务框架或 TensorRT 路径。
 
-```bash
-bash evaluate.sh --run data/outputs/training/train-<时间>
-```
-
-打开输出报告的 `index.html`，看原图、预测文字、漏检、误检和错字。默认使用最终模型，至多抽取 100 张验证图。**精简目录只评估保留的约 1% 验证样例**，终端、报告和统计文件会标明这一范围；`--limit 0` 使用全部保留样例，不代表完整验证集。尚未精简的旧目录仍读取完整 `data/det_val.txt`。`curves.html` 查看 LSVT 训练曲线，`summary.json` 查看指标和耗时。更多选项见 `bash evaluate.sh --help`。
-
-同一批图比较训练前后效果：
-
-```bash
-bash evaluate.sh --run data/outputs/training/train-<时间> --weights pretrained --limit 100 --seed 42
-bash evaluate.sh --run data/outputs/training/train-<时间> --weights best --limit 100 --seed 42
-```
-
-训练中的 rec 准确率是在标注裁剪上计算的；整张街景的效果要看上述评估报告。报告按多边形 IoU≥0.5 匹配，文字去空格后整条比较，不是官方排行榜分数。耗时包含检测、裁剪、识别，磁盘读取另计；默认 FP32、检测最长边 960、识别 batch=6、无方向分类器。训练机速度不能代替路侧设备速度。
-
-## 数据规则与代码检查
-
-ReCTS 从官方 train 中按标注文件名排序、seed=42 打乱，再按 **7:1:2** 划分训练、验证和测试集。现有 20000 份标注对应 14000/2000/4000 张；各集合编号保存到 `rects/data/train_ids.txt`、`val_ids.txt`、`test_ids.txt`。测试集只预留编号，训练准备不读取其图片或标注，也不生成测试裁剪。
-
-LSVT 固定编号：0–10499 训练，10500–11999 验证，12000–14999 测试预留。两种数据均先划分再检查图片，缺图不补号、不挪集合；测试集不参与训练和开发验证。
-
-检测保留有效多边形，忽略文字为 `###`；识别使用文字区域裁剪，未知字符、控制字符、超长文字及无效裁剪整条跳过并记录。原图、原始标签、官方源码和初始权重只读；训练产物按上述规则精简。
-
-环境：Python 3.10、Paddle GPU 3.1.1、本地 PaddleOCR v3.2.0。源码默认在 `data/vendor/PaddleOCR-sparse`，官方权重在 `data/models/pretrained`。
+## 检查
 
 ```bash
 python -m pytest -q
@@ -122,3 +103,5 @@ ruff check src tests
 black --check --workers 1 src tests
 mypy
 ```
+
+合成测试覆盖抽样隔离、缩放/补齐像素一致性、检测验证参数、训练衔接和现有评估行为。真实模型冒烟、训练与性能结果需另行说明，不能以单测替代。

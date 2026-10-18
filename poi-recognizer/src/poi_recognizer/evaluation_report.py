@@ -86,6 +86,8 @@ def timing_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate measured images only; total throughput includes detection and recognition."""
     result: dict[str, Any] = {}
     for key in ("read", "det", "crop", "rec", "pipeline"):
+        if not all(key in record["seconds"] for record in records):
+            continue
         values = [record["seconds"][key] for record in records]
         result[key] = {
             "mean_ms": float(np.mean(values) * 1000),

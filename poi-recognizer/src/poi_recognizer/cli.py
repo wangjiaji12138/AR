@@ -11,7 +11,6 @@ from typing import Sequence
 import yaml
 
 from .dataset import prepare_data
-from .retention import compact_run
 from .training import train, training_config
 
 
@@ -19,6 +18,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Execute the linear training pipeline; --smoke bounds data and epochs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("configs/train.json"))
+    parser.add_argument("--gpu", type=int, help="Override the physical GPU index")
     parser.add_argument(
         "--smoke", action="store_true", help="Use four images per split and one epoch"
     )
@@ -76,10 +76,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ValueError(f"Output must be outside {key}")
         epochs = 1 if args.smoke else int(config.get("epochs", 50))
-        rects_epochs = 1 if args.smoke else int(config.get("rects_epochs", epochs))
+        rects_epochs = epochs
         batch = 2 if args.smoke else int(config.get("batch_size", 8))
         rate = float(config.get("learning_rate", 0.0001))
-        gpu = int(config.get("gpu", 0))
+        gpu = args.gpu if args.gpu is not None else int(config.get("gpu", 0))
+        config["gpu"] = gpu
+        sample_fraction = float(config.get("sample_fraction", 0.1))
+        amp = config.get("amp", True)
+        if not isinstance(amp, bool) or not 0 < sample_fraction <= 1:
+            raise ValueError("Invalid amp or sample_fraction")
         if min(epochs, rects_epochs) < 1 or batch < 1 or not 0 < rate < 1 or gpu < 0:
             raise ValueError("Invalid epochs, batch_size, learning_rate or gpu")
         run = paths["output"] / (("smoke-" if args.smoke else "train-") + run_id)
@@ -87,6 +92,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         (run / "settings.json").write_text(json.dumps(config, indent=2))
         rec = yaml.safe_load((source / "configs/rec/PP-OCRv5/PP-OCRv5_mobile_rec.yml").read_text())
         logging.info("本次输出：%s", run)
+        logging.info(
+            "各数据集抽取 %.0f%% 原图后重新按 7:1:2 划分；seed=42；AMP=%s；保留准备数据",
+            sample_fraction * 100,
+            amp,
+        )
         logging.info(
             "训练顺序：ReCTS 检测 → ReCTS 识别 → LSVT 检测 → LSVT 识别\n"
             "每个 ReCTS 模型 %d 轮，每个 LSVT 模型 %d 轮；batch=%d，GPU=%d",
@@ -118,6 +128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rec["Global"]["max_text_length"],
                 args.smoke,
                 dataset=dataset,
+                sample_fraction=sample_fraction,
             )
             logging.info(
                 "数据就绪：训练 %d 张，验证 %d 张；统计：%s",
@@ -141,6 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     batch,
                     rate,
                     initial_weights=initial,
+                    amp=amp,
                 )
                 logging.info(
                     "\n%s，共 %d 轮\n初始权重：%s\n日志：%s",
@@ -151,8 +163,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 train(effective, source, stage_run, task, gpu)
                 logging.info("完成：%s；模型目录：%s", stage, stage_run / task)
-        stage = "精简训练产物，保留 1% 图像及配套标签样例"
-        compact_run(run)
         logging.info(
             "\n训练全部完成，用时 %.0f 秒\n最终检测权重：%s\n最终识别权重：%s",
             time.monotonic() - started,

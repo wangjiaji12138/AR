@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from .preprocessing import DET_LIMIT_TYPE, DET_SIDE_LEN
 from .training_output import TrainingOutput
 
 
@@ -21,6 +22,7 @@ def training_config(
     batch_size: int,
     learning_rate: float,
     initial_weights: Path | None = None,
+    amp: bool = True,
 ) -> dict[str, Any]:
     """Adapt fixed PP-OCRv5 mobile YAMLs without changing model architecture."""
     model = f"PP-OCRv5_mobile_{task}"
@@ -39,6 +41,10 @@ def training_config(
         eval_batch_epoch=1,
         print_batch_step=1,  # Feed live progress; TrainingOutput emits one summary per epoch.
         use_visualdl=False,
+        use_amp=amp,
+        amp_level="O1",
+        scale_loss=128.0,
+        use_dynamic_loss_scaling=True,
     )
     config["Optimizer"]["lr"].update(learning_rate=learning_rate, warmup_epoch=0)
     for section, split in (("Train", "train"), ("Eval", "val")):
@@ -48,7 +54,7 @@ def training_config(
         )
         # Keep the official worker counts so CPU transforms can feed the GPU.
         config[section]["loader"].update(
-            batch_size_per_card=batch_size if section == "Train" else 1,
+            batch_size_per_card=batch_size if section == "Train" or task == "rec" else 1,
             drop_last=False,
         )
         # CopyPaste assumes quads; concatenation may exceed the mobile CTC budget.
@@ -59,9 +65,25 @@ def training_config(
             for settings in op.values():
                 if isinstance(settings, dict) and "total_epoch" in settings:
                     settings["total_epoch"] = epochs
+            if "DetResizeForTest" in op:
+                op["DetResizeForTest"] = {
+                    "limit_side_len": DET_SIDE_LEN,
+                    "limit_type": DET_LIMIT_TYPE,
+                }
     if task == "rec":
         config["Global"]["character_dict_path"] = str(source / "ppocr/utils/dict/ppocrv5_dict.txt")
-        config["Train"]["sampler"].update(scales=[[320, 48]], first_bs=batch_size, fix_bs=True)
+        config["Train"].pop("sampler", None)
+        for section in ("Train", "Eval"):
+            dataset = config[section]["dataset"]
+            dataset["name"] = "SimpleDataSet"
+            dataset.pop("ds_width", None)
+            transforms = [op for op in dataset["transforms"] if "RecResizeImg" not in op]
+            position = next(
+                (i for i, op in enumerate(transforms) if "KeepKeys" in op), len(transforms)
+            )
+            transforms.insert(position, {"DynamicRecResize": None})
+            dataset["transforms"] = transforms
+            config[section]["loader"]["collate_fn"] = "RecognitionCollator"
     return config
 
 

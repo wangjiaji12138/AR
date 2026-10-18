@@ -21,7 +21,13 @@ import yaml
 from PIL import Image
 
 from .evaluation_report import draw_boxes, match_predictions, quality, timing_summary, write_report
-from .geometry import read_image
+from .geometry import crop_text, read_image
+from .preprocessing import (
+    DET_LIMIT_TYPE,
+    DET_SIDE_LEN,
+    recognition_width,
+    resize_recognition,
+)
 
 
 def export_model(task: str, source: Path, output: Path, environment: dict[str, str]) -> None:
@@ -223,13 +229,19 @@ def training_curves(run: Path, output: Path) -> dict[str, Any]:
     return training
 
 
-def build_predictor(source: Path, output: Path, side_len: int) -> tuple[Any, Any, Any]:
+def build_predictor(
+    source: Path, output: Path, side_len: int, rec_batch: int = 16
+) -> tuple[Any, Any, Any]:
     """Build official FP32 GPU predictors with explicit mobile-rec input dimensions."""
     sys.path.insert(0, str(source))
     import paddle
     from tools.infer import utility
     from tools.infer.predict_det import TextDetector
     from tools.infer.predict_rec import TextRecognizer
+
+    class DynamicTextRecognizer(TextRecognizer):
+        def resize_norm_img(self, img: Any, max_wh_ratio: float) -> Any:
+            return resize_recognition(img, recognition_width(max_wh_ratio))[0]
 
     if not paddle.is_compiled_with_cuda() or paddle.device.cuda.device_count() < 1:
         raise RuntimeError("A CUDA GPU is required")
@@ -241,30 +253,31 @@ def build_predictor(source: Path, output: Path, side_len: int) -> tuple[Any, Any
     args.rec_model_dir = str(output / "models/rec/inference")
     args.rec_char_dict_path = str(source / "ppocr/utils/dict/ppocrv5_dict.txt")
     args.rec_image_shape = "3,48,320"
-    args.rec_batch_num = 6
+    args.rec_batch_num = rec_batch
     args.det_limit_side_len = side_len
-    args.det_limit_type = "max"
+    args.det_limit_type = DET_LIMIT_TYPE
     args.use_tensorrt = False
     args.enable_mkldnn = False
-    return TextDetector(args), TextRecognizer(args), paddle
+    return TextDetector(args), DynamicTextRecognizer(args), paddle
 
 
 def infer(
-    image: Any, detector: Any, recognizer: Any, paddle: Any
+    image: Any, detector: Any, recognizer: Any, paddle: Any, profile_stages: bool = False
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
-    """Synchronize GPU at stage boundaries and time the complete image pipeline."""
-    from tools.infer.utility import get_rotate_crop_image
-
-    paddle.device.cuda.synchronize()
+    """Time completed OCR; stage synchronization is optional profiling overhead."""
+    if profile_stages:
+        paddle.device.cuda.synchronize()
     start = time.perf_counter()
     boxes, _ = detector(image)
-    paddle.device.cuda.synchronize()
+    if profile_stages:
+        paddle.device.cuda.synchronize()
     det_end = time.perf_counter()
     polygons = [] if boxes is None else list(boxes)
-    crops = [get_rotate_crop_image(image, box.copy()) for box in polygons]
+    crops = [crop_text(image, box.tolist()) for box in polygons]
     crop_end = time.perf_counter()
     results = recognizer(crops)[0] if crops else []
-    paddle.device.cuda.synchronize()
+    if profile_stages:
+        paddle.device.cuda.synchronize()
     rec_end = time.perf_counter()
     if len(results) != len(polygons):
         raise RuntimeError("Recognizer returned a different number of results than crops")
@@ -273,12 +286,11 @@ def infer(
         for box, (text, score) in zip(polygons, results)
     ]
     end = time.perf_counter()
-    return predictions, {
-        "det": det_end - start,
-        "crop": crop_end - det_end,
-        "rec": rec_end - crop_end,
-        "pipeline": end - start,
-    }
+    seconds = {"pipeline": end - start}
+    if profile_stages:
+        seconds.update(det=det_end - start, crop=crop_end - det_end, rec=rec_end - crop_end)
+    # Official GPU predictors copy their results back to CPU before returning.
+    return predictions, seconds
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -301,12 +313,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--det-side-len", type=int, default=960)
+    parser.add_argument("--det-side-len", type=int, default=DET_SIDE_LEN)
+    parser.add_argument("--rec-batch", type=int, default=16)
+    parser.add_argument("--profile-stages", action="store_true", help="Synchronize each GPU stage")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     output: Path | None = None
     try:
-        if args.limit < 0 or args.warmup < 0 or args.gpu < 0 or args.det_side_len < 32:
+        if (
+            args.limit < 0
+            or args.warmup < 0
+            or args.gpu < 0
+            or args.det_side_len < 32
+            or args.rec_batch < 1
+        ):
             raise ValueError("Invalid limit, warmup, gpu or det-side-len")
         run, source = args.run.resolve(), args.source.resolve()
         output = (
@@ -359,7 +379,9 @@ def main(argv: list[str] | None = None) -> int:
             export_model(task, source, output, environment)
         training = training_curves(run, output)
         logging.info("Initializing inference predictors")
-        detector, recognizer, paddle = build_predictor(source, output, args.det_side_len)
+        detector, recognizer, paddle = build_predictor(
+            source, output, args.det_side_len, args.rec_batch
+        )
         if args.warmup:
             logging.info("Warming up: %d iterations", args.warmup)
             warm_image = None
@@ -372,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             if warm_image is None:
                 raise RuntimeError("No images could be decoded for warmup")
             for _ in range(args.warmup):
-                infer(warm_image, detector, recognizer, paddle)
+                infer(warm_image, detector, recognizer, paddle, args.profile_stages)
         records = []
         skipped = []
         counts = dict.fromkeys(("targets", "predictions", "detected", "correct"), 0)
@@ -385,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
                 skipped.append({"image": str(path), "error": str(exc)})
                 logging.warning("Skipped %s: %s", path, exc)
                 continue
-            predictions, seconds = infer(image, detector, recognizer, paddle)
+            predictions, seconds = infer(image, detector, recognizer, paddle, args.profile_stages)
             seconds["read"] = read_seconds
             matched = match_predictions(labels, predictions)
             for key in counts:
@@ -428,7 +450,9 @@ def main(argv: list[str] | None = None) -> int:
                 "paddle": paddle.__version__,
                 "precision": "FP32",
                 "image_batch": 1,
-                "rec_batch": 6,
+                "rec_batch": args.rec_batch,
+                "recognition_resize": "height=48, proportional, width>=320 aligned to 8; batch padding",
+                "profile_stages": args.profile_stages,
                 "det_max_side": args.det_side_len,
                 "warmup": args.warmup,
                 "confidence_filter": "none; all predicted boxes evaluated",
@@ -437,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
                 "max_gpu_reserved_bytes": paddle.device.cuda.max_memory_reserved(),
                 "max_host_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             },
-            "timing_scope": "Synchronized GPU wall time. Pipeline includes detection/pre/postprocessing, cropping and recognition; excludes read, export, init, warmup, matching, drawing and report. Memory peaks include init/warmup. Paddle allocator counters may omit inference-engine allocations and are not total VRAM. Other GPU jobs may affect speed; not a roadside benchmark.",
+            "timing_scope": "Completed CPU-result wall time; extra GPU synchronization only with profile_stages. Pipeline includes detection/pre/postprocessing, cropping and recognition; excludes read, export, init, warmup, matching, drawing and report. Memory peaks include init/warmup. Paddle allocator counters may omit inference-engine allocations and are not total VRAM. Other GPU jobs may affect speed; not a roadside benchmark.",
             "run": str(run),
             "seed": args.seed,
         }
